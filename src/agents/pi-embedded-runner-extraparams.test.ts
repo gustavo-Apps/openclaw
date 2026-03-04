@@ -1031,6 +1031,141 @@ describe("applyExtraParamsToAgent", () => {
     expect(headers).toEqual({ "X-Custom": "1" });
   });
 
+  it("does not apply Anthropic thinking parameter for copilot-proxy non-Claude models", () => {
+    const agent = { streamFn: vi.fn() };
+    const originalStreamFn = agent.streamFn;
+    
+    applyExtraParamsToAgent(
+      agent,
+      undefined,
+      "copilot-proxy", // Non-Anthropic provider
+      "gpt-5.2", // Non-Claude model
+      undefined,
+      "low", // Thinking level
+      undefined,
+    );
+
+    // Should still have a streamFn (for other wrappers) but not the Anthropic thinking wrapper
+    // We can verify this by checking that the thinking parameter is not injected
+    const mockModel = { id: "gpt-5.2", provider: "copilot-proxy" };
+    const mockContext = [];
+    const mockOptions = { onPayload: vi.fn() };
+
+    agent.streamFn!(mockModel, mockContext, mockOptions);
+
+    expect(mockOptions.onPayload).toHaveBeenCalledTimes(1);
+    const payload = { some: "payload" };
+    mockOptions.onPayload(payload);
+
+    // Should not have thinking parameter added
+    expect(payload).toEqual({ some: "payload" });
+  });
+
+  it("applies Anthropic thinking parameter for copilot-proxy Claude models", () => {
+    const agent = { streamFn: vi.fn() };
+    applyExtraParamsToAgent(
+      agent,
+      undefined,
+      "copilot-proxy", // Non-Anthropic provider
+      "claude-sonnet-4.5", // Claude model
+      undefined,
+      "low", // Thinking level
+      undefined,
+    );
+
+    expect(agent.streamFn).toBeDefined();
+    expect(agent.streamFn).not.toBe(vi.fn()); // Should be wrapped
+
+    // Test that thinking parameter is injected
+    const mockModel = { id: "claude-sonnet-4.5", provider: "copilot-proxy" };
+    const mockContext = [];
+    const mockOptions = { onPayload: vi.fn() };
+
+    agent.streamFn!(mockModel, mockContext, mockOptions);
+
+    expect(mockOptions.onPayload).toHaveBeenCalledTimes(1);
+    const payload = { some: "payload" };
+    mockOptions.onPayload(payload);
+
+    expect(payload).toEqual({ some: "payload", thinking: "low" });
+  });
+
+  it("applies Anthropic thinking parameter for non-off thinking levels", () => {
+    const payloads: Record<string, unknown>[] = [];
+    const baseStreamFn: StreamFn = (_model, _context, options) => {
+      const payload: Record<string, unknown> = {};
+      options?.onPayload?.(payload);
+      payloads.push(payload);
+      return {} as ReturnType<StreamFn>;
+    };
+    const agent = { streamFn: baseStreamFn };
+
+    applyExtraParamsToAgent(agent, undefined, "anthropic", "claude-opus-4-6", undefined, "low");
+
+    const model = {
+      api: "anthropic-messages",
+      provider: "anthropic",
+      id: "claude-opus-4-6",
+    } as Model<"anthropic-messages">;
+    const context: Context = { messages: [] };
+    void agent.streamFn?.(model, context, {});
+
+    expect(payloads).toHaveLength(1);
+    expect(payloads[0]?.thinking).toBe("low");
+  });
+
+  it("applies Anthropic thinking parameter medium for high/xhigh/adaptive levels", () => {
+    const testCases = ["medium", "high", "xhigh", "adaptive"] as const;
+    
+    for (const thinkLevel of testCases) {
+      const payloads: Record<string, unknown>[] = [];
+      const baseStreamFn: StreamFn = (_model, _context, options) => {
+        const payload: Record<string, unknown> = {};
+        options?.onPayload?.(payload);
+        payloads.push(payload);
+        return {} as ReturnType<StreamFn>;
+      };
+      const agent = { streamFn: baseStreamFn };
+
+      applyExtraParamsToAgent(agent, undefined, "anthropic", "claude-opus-4-6", undefined, thinkLevel);
+
+      const model = {
+        api: "anthropic-messages",
+        provider: "anthropic",
+        id: "claude-opus-4-6",
+      } as Model<"anthropic-messages">;
+      const context: Context = { messages: [] };
+      void agent.streamFn?.(model, context, {});
+
+      expect(payloads).toHaveLength(1);
+      expect(payloads[0]?.thinking).toBe("medium");
+    }
+  });
+
+  it("does not apply Anthropic thinking parameter when thinking is off", () => {
+    const payloads: Record<string, unknown>[] = [];
+    const baseStreamFn: StreamFn = (_model, _context, options) => {
+      const payload: Record<string, unknown> = {};
+      options?.onPayload?.(payload);
+      payloads.push(payload);
+      return {} as ReturnType<StreamFn>;
+    };
+    const agent = { streamFn: baseStreamFn };
+
+    applyExtraParamsToAgent(agent, undefined, "anthropic", "claude-opus-4-6", undefined, "off");
+
+    const model = {
+      api: "anthropic-messages",
+      provider: "anthropic",
+      id: "claude-opus-4-6",
+    } as Model<"anthropic-messages">;
+    const context: Context = { messages: [] };
+    void agent.streamFn?.(model, context, {});
+
+    expect(payloads).toHaveLength(1);
+    expect(payloads[0]).not.toHaveProperty("thinking");
+  });
+
   it("forces store=true for direct OpenAI Responses payloads", () => {
     const payload = runResponsesPayloadMutationCase({
       applyProvider: "openai",

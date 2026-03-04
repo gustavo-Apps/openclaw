@@ -560,6 +560,72 @@ function createSiliconFlowThinkingWrapper(baseStreamFn: StreamFn | undefined): S
   };
 }
 
+function isClaudeModel(modelId: string): boolean {
+  return /\bclaude-/i.test(modelId);
+}
+
+/**
+ * Determine if we should apply the Anthropic thinking wrapper.
+ * Applies to:
+ * - Direct Anthropic provider
+ * - Any provider serving Claude models (e.g., copilot-proxy with Claude models)
+ */
+function shouldApplyAnthropicThinkingWrapper(provider: string, modelId: string): boolean {
+  if (provider === "anthropic") {
+    return true;
+  }
+  
+  // For other providers, check if they're serving Claude models
+  return isClaudeModel(modelId);
+}
+
+/**
+ * Map OpenClaw's ThinkLevel to Anthropic's thinking parameter format.
+ * For Claude 4.0+ models with thinking enabled, this ensures proper formatting.
+ */
+function mapThinkingLevelToAnthropicThinking(
+  thinkingLevel: ThinkLevel,
+): "low" | "medium" | undefined {
+  if (thinkingLevel === "off") {
+    return undefined;
+  }
+  if (thinkingLevel === "minimal" || thinkingLevel === "low") {
+    return "low";
+  }
+  if (thinkingLevel === "medium" || thinkingLevel === "high" || thinkingLevel === "xhigh" || thinkingLevel === "adaptive") {
+    return "medium";
+  }
+  return undefined;
+}
+
+/**
+ * Anthropic Claude 4.0+ models with thinking enabled require assistant messages
+ * to start with a thinking block. This wrapper handles the thinking parameter
+ * format for newer Claude models.
+ */
+function createAnthropicThinkingWrapper(
+  baseStreamFn: StreamFn | undefined,
+  thinkingLevel?: ThinkLevel,
+): StreamFn {
+  const underlying = baseStreamFn ?? streamSimple;
+  return (model, context, options) => {
+    const originalOnPayload = options?.onPayload;
+    return underlying(model, context, {
+      ...options,
+      onPayload: (payload) => {
+        if (payload && typeof payload === "object" && thinkingLevel && thinkingLevel !== "off") {
+          const payloadObj = payload as Record<string, unknown>;
+          const anthropicThinking = mapThinkingLevelToAnthropicThinking(thinkingLevel);
+          if (anthropicThinking) {
+            payloadObj.thinking = anthropicThinking;
+          }
+        }
+        originalOnPayload?.(payload);
+      },
+    });
+  };
+}
+
 type MoonshotThinkingType = "enabled" | "disabled";
 
 function normalizeMoonshotThinkingType(value: unknown): MoonshotThinkingType | undefined {
@@ -907,6 +973,13 @@ export function applyExtraParamsToAgent(
       `normalizing thinking=off to thinking=null for SiliconFlow compatibility (${provider}/${modelId})`,
     );
     agent.streamFn = createSiliconFlowThinkingWrapper(agent.streamFn);
+  }
+
+  if (shouldApplyAnthropicThinkingWrapper(provider, modelId) && thinkingLevel && thinkingLevel !== "off") {
+    log.debug(
+      `applying Anthropic thinking=${thinkingLevel} payload wrapper for ${provider}/${modelId}`,
+    );
+    agent.streamFn = createAnthropicThinkingWrapper(agent.streamFn, thinkingLevel);
   }
 
   if (provider === "moonshot") {
